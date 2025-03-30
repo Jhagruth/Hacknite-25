@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Power Plant Location Finder</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+    <style>
+        #map { height: 600px; }
+        #loading { display: none; font-size: 20px; color: blue; }
+        #clearButton { margin-top: 10px; padding: 10px; background-color: red; color: white; border: none; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>Find Optimal Power Plant Locations</h1>
+    
+    <!-- Input Form for Power Type, Location, and Time -->
+    <form id="powerPlantForm">
+        <label for="powerType">Power Plant Type:</label>
+        <select id="powerType" name="powerType">
+            <option value="solar">Solar</option>
+            <option value="wind">Wind</option>
+            <option value="thermal">Thermal</option>
+        </select><br>
+        
+        <label for="location">Location (Latitude, Longitude):</label>
+        <input type="text" id="location" name="location" placeholder="Latitude, Longitude" required><br>
+        
+        <label for="time">Time (Start Date, End Date):</label>
+        <input type="text" id="time" name="time" placeholder="YYYY-MM-DD, YYYY-MM-DD" required><br>
+        
+        <button type="submit">Get Optimal Locations</button>
+    </form>
+
+    <!-- Loading Indicator -->
+    <div id="loading">Loading...</div>
+
+    <!-- Clear Button -->
+    <button id="clearButton">Clear Map</button>
+
+    <!-- Map Container -->
+    <div id="map"></div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+      // Initialize the map
+      var map = L.map('map').setView([51.505, -0.09], 2);  // Default view
+  
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+      // Array to hold the markers
+      var markers = [];
+
+      // Handle the form submission
+      $("#powerPlantForm").submit(function(event) {
+          event.preventDefault();
+
+          // Get the input values
+          var powerType = $("#powerType").val();
+          var location = $("#location").val().split(",");
+          var time = $("#time").val().split(",");
+
+          // Validate Location Format (Latitude, Longitude)
+          if (location.length !== 2 || isNaN(location[0]) || isNaN(location[1])) {
+              alert("Please enter a valid Latitude and Longitude.");
+              return;
+          }
+
+          // Validate Time Format (YYYY-MM-DD, YYYY-MM-DD)
+          if (time.length !== 2 || !Date.parse(time[0]) || !Date.parse(time[1])) {
+              alert("Please enter a valid time range.");
+              return;
+          }
+
+          // Show loading indicator while waiting for the response
+          $("#loading").show();
+
+          // Send the request to the backend
+          $.ajax({
+              url: "/get_optimal_locations",
+              type: "POST",
+              contentType: "application/json",
+              data: JSON.stringify({
+                  "power_type": powerType,
+                  "location": { "lat": parseFloat(location[0]), "lon": parseFloat(location[1]) },
+                  "time": { "start": time[0], "end": time[1] }
+              }),
+              success: function(response) {
+                  $("#loading").hide();  // Hide loading indicator
+
+                  console.log(response);  // Log the response to verify its content
+
+                  if (response && response.lat && response.lon) {
+                      var latLon = [response.lat, response.lon];
+
+                      // Dynamically create popup content based on the power type
+                      var popupContent = "Optimal location for " + powerType + "<br>";
+
+                      if (powerType === "solar") {
+                          // Display solar value in the popup if available
+                          popupContent += "Solar Value: " + (response.solar_value || "No Data Available");
+                      } else if (powerType === "wind") {
+                          // Display wind speed in the popup if available
+                          popupContent += "Wind Speed: " + (response.wind_speed || "No Data Available");
+                      } else if (powerType === "thermal") {
+                          // Display thermal value in the popup if available
+                          popupContent += "Thermal Value: " + (response.thermal_value || "No Data Available");
+                      }
+
+                      // Add marker with popup
+                      var marker = L.marker(latLon).addTo(map)
+                          .bindPopup(popupContent)
+                          .openPopup();
+                      
+                      // Store the marker for later removal
+                      markers.push(marker);
+                  } else {
+                      alert("No valid location data returned.");
+                  }
+              },
+              error: function(xhr, status, error) {
+                  $("#loading").hide();  // Hide loading indicator
+                  alert("An error occurred: " + error);
+              }
+          });
+      });
+
+      // Handle the clear button click
+      $("#clearButton").click(function() {
+          // Remove all markers from the map
+          markers.forEach(function(marker) {
+              map.removeLayer(marker);
+          });
+          // Clear the markers array
+          markers = [];
+      });
+
+    </script>
+</body>
+</html>
