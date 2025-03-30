@@ -1,4 +1,4 @@
-# Solar Suitability AI Model
+# Solar Suitability Model
 
 ## Overview
 This project implements a machine learning-based solar suitability model using environmental and spatial data. The model leverages XGBoost for advanced predictions, incorporating polynomial features, hyperparameter tuning, and feature importance analysis.
