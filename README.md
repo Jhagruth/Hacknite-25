@@ -1,70 +1,41 @@
-# Getting Started with Create React App
+# Solar Suitability AI Model
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+## Overview
+This project implements a machine learning-based solar suitability model using environmental and spatial data. The model leverages XGBoost for advanced predictions, incorporating polynomial features, hyperparameter tuning, and feature importance analysis.
 
-## Available Scripts
+## Data Sources
+The following datasets were used in this project:
 
-In the project directory, you can run:
+1. **MODIS/006/MCD12Q1** - Vegetation data
+2. **ECMWF/ERA5/DAILY** - Wind speed data
+3. **ESA/WorldCover/v100** - Urbanization data
+4. **NASA/GEOS-5/MERRA2** - Solar radiation data
 
-### `npm start`
+These datasets were accessed via Google Earth Engine (GEE) and preprocessed for training the model.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+## Features and Methodology
+- **Data Processing**: Extracted spatial data and normalized values using `MinMaxScaler`.
+- **Feature Engineering**: Applied polynomial feature expansion.
+- **Machine Learning Model**: Utilized XGBoost with hyperparameter tuning via GridSearchCV.
+- **Evaluation**: Used R² scores and feature importance analysis.
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Installation
+To run the project, install the required dependencies:
+```bash
+pip install pandas numpy scikit-learn xgboost flask geopandas osmnx geopy
+```
 
-### `npm test`
+## Running the Model
+1. Ensure you have the required datasets preprocessed.
+2. Run the model script:
+```bash
+python app.py
+```
+3. Access the Flask-based interface at `http://127.0.0.1:5000/`.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Citations
+- **ChatGPT** - Assisted in model development and optimization.
+- **Google Earth Engine** - Provided remote sensing datasets.
 
-### `npm run build`
-
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
-
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
-
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+---
+This project is open for improvements and contributions!
