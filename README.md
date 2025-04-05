@@ -1,7 +1,7 @@
 # Novel Model to find an Optimal Location to set up a Sustainable Energy Power Plant
 
 ## Overview
-This project implements a machine learning-based solar suitability model using environmental and spatial data. The model leverages XGBoost for advanced predictions, incorporating polynomial features, hyperparameter tuning, and feature importance analysis.
+This project implements a machine learning-based suitability model that integrates environmental and spatial data with Google Earth Engine APIs. The model utilises XGBoost for advanced predictions, incorporating polynomial features, hyperparameter tuning, and feature importance analysis.
 
 ## Data Sources
 The following datasets were used in this project:
