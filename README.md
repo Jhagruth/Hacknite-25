@@ -6,7 +6,7 @@ This project implements a machine learning-based suitability model that integrat
 ## Data Sources
 The following datasets were used in this project:
 
-1. **MODIS/006/MCD12Q1** - Vegetation data
+1. **MODIS/061/MCD12Q1** - Vegetation data
 2. **ECMWF/ERA5/DAILY** - Wind speed data
 3. **ESA/WorldCover/v100** - Urbanization data
 4. **NASA/GEOS-5/MERRA2** - Solar radiation data
