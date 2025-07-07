@@ -1,11 +1,15 @@
 from flask import Flask, request, jsonify, render_template
 import ee
 import logging
+import math
 from datetime import datetime
 import traceback
+import concurrent.futures
+import time
+from functools import lru_cache
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Initialize Earth Engine with your project
@@ -18,6 +22,21 @@ except Exception as e:
 
 app = Flask(__name__)
 
+# Cache for repeated requests
+@lru_cache(maxsize=128)
+def get_cached_modis_data(start_date, end_date, west, south, east, north):
+    """Cache MODIS data for repeated requests"""
+    region = ee.Geometry.Rectangle([west, south, east, north])
+    
+    modis_collection = ee.ImageCollection('MODIS/061/MCD12Q1').filterDate(start_date, end_date)
+    modis_size = modis_collection.size().getInfo()
+    
+    if modis_size == 0:
+        # Use cached broader range
+        modis_collection = ee.ImageCollection('MODIS/061/MCD12Q1').filterDate('2020-01-01', '2023-12-31')
+    
+    return modis_collection.mean().select('LC_Type1').rename('vegetation')
+
 @app.route('/')
 def home():
     return render_template('index1.html')
@@ -25,7 +44,6 @@ def home():
 def validate_date_format(date_string):
     """Validate and format date string"""
     try:
-        # Try parsing common date formats
         formats = ['%Y-%m-%d', '%Y/%m/%d', '%d-%m-%Y', '%d/%m/%Y']
         for fmt in formats:
             try:
@@ -46,116 +64,127 @@ def validate_coordinates(boundary):
         lonMax = float(boundary["lonMax"])
         latMax = float(boundary["latMax"])
         
-        # Validate coordinate ranges
-        if not (-180 <= lonMin <= 180) or not (-180 <= lonMax <= 180):
-            raise ValueError("Longitude values must be between -180 and 180")
-        if not (-90 <= latMin <= 90) or not (-90 <= latMax <= 90):
-            raise ValueError("Latitude values must be between -90 and 90")
-        
-        # Validate bounding box logic
-        if lonMin >= lonMax:
-            raise ValueError("lonMin must be less than lonMax")
         if latMin >= latMax:
             raise ValueError("latMin must be less than latMax")
         
-        logger.info(f"Validated coordinates: ({lonMin}, {latMin}) to ({lonMax}, {latMax})")
+        if lonMin >= lonMax:
+            logger.warning(f"Longitude boundary crosses dateline: lonMin={lonMin}, lonMax={lonMax}")
+        
         return lonMin, latMin, lonMax, latMax
     except (KeyError, ValueError) as e:
         logger.error(f"Coordinate validation error: {str(e)}")
         raise
 
-def is_point_in_boundary(lon, lat, lonMin, latMin, lonMax, latMax):
+def is_point_in_boundary(lon, lat, west, south, east, north):
     """Check if a point is within the boundary"""
-    return lonMin <= lon <= lonMax and latMin <= lat <= latMax
+    return west <= lon <= east and south <= lat <= north
+
+def calculate_optimized_sampling_params(west, south, east, north):
+    """Calculate optimized sampling parameters for speed"""
+    # Calculate area in square kilometers
+    lat_center = (north + south) / 2
+    lon_km_per_deg = 111.32 * abs(math.cos(math.radians(lat_center)))
+    lat_km_per_deg = 110.54
+    area_km2 = abs(east - west) * abs(north - south) * lon_km_per_deg * lat_km_per_deg
+    
+    # Optimized sampling for speed vs accuracy balance
+    if area_km2 < 500:  # Very small area
+        scale = 500
+        num_pixels = 5000
+        passes = 2
+    elif area_km2 < 2000:  # Small area
+        scale = 750
+        num_pixels = 8000
+        passes = 2
+    elif area_km2 < 10000:  # Medium area
+        scale = 1000
+        num_pixels = 12000
+        passes = 3
+    else:  # Large area
+        scale = 1500
+        num_pixels = 15000
+        passes = 3
+    
+    logger.info(f"Area: {area_km2:.2f} km² -> Scale: {scale}m, Samples: {num_pixels}, Passes: {passes}")
+    return scale, num_pixels, area_km2, passes
+
+def parallel_sampling(combined, region, scale, num_pixels, seed_offset=0):
+    """Parallel sampling function for concurrent execution"""
+    try:
+        samples = combined.sample(
+            region=region,
+            scale=scale,
+            numPixels=num_pixels,
+            geometries=True,
+            seed=42 + seed_offset
+        )
+        return samples
+    except Exception as e:
+        logger.warning(f"Parallel sampling failed: {str(e)}")
+        return None
 
 @app.route('/get_optimal_location', methods=['POST'])
 def get_optimal_location():
+    start_time = time.time()
     try:
-        # Log the incoming request
         logger.info("Received request for optimal location")
         
         data = request.get_json()
-        logger.debug(f"Request data: {data}")
-        
         if not data:
-            logger.error("No JSON data received")
             return jsonify({"error": "No JSON data received"}), 400
             
         boundary = data.get('boundary')
         time_range = data.get('time')
         plant_type = data.get('plant_type')
 
-        # Validate required fields
+        # Quick validation
         if not boundary or not time_range or not plant_type:
             missing_fields = []
             if not boundary: missing_fields.append('boundary')
             if not time_range: missing_fields.append('time')
             if not plant_type: missing_fields.append('plant_type')
-            
-            error_msg = f"Missing required fields: {', '.join(missing_fields)}"
-            logger.error(error_msg)
-            return jsonify({"error": error_msg}), 400
+            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
 
-        # Parse and validate coordinates
+        # Parse coordinates
         try:
             lonMin, latMin, lonMax, latMax = validate_coordinates(boundary)
-            logger.info(f"Coordinates validated: ({lonMin}, {latMin}) to ({lonMax}, {latMax})")
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
-        # Validate and parse dates
+        # Parse dates
         try:
             start_date = validate_date_format(time_range["start"])
             end_date = validate_date_format(time_range["end"])
-            logger.info(f"Date range: {start_date} to {end_date}")
         except (KeyError, ValueError) as e:
             return jsonify({"error": f"Invalid date format: {str(e)}"}), 400
 
-        # Create region geometry - this ensures sampling is within boundary
-        region = ee.Geometry.Rectangle([lonMin, latMin, lonMax, latMax])
-        logger.info(f"Region created with bounds: {[lonMin, latMin, lonMax, latMax]}")
+        # Handle coordinate ordering
+        west, east, south, north = lonMin, lonMax, latMin, latMax
+        
+        if west > east and abs(west - east) < 180:
+            west, east = east, west
+        if south > north:
+            south, north = north, south
+        
+        region = ee.Geometry.Rectangle([west, south, east, north])
 
-        # Get land cover from MODIS
-        logger.info("Fetching MODIS land cover data...")
+        # Fast MODIS data retrieval with caching
         try:
-            modis_collection = ee.ImageCollection('MODIS/061/MCD12Q1').filterDate(start_date, end_date)
-            modis_size = modis_collection.size().getInfo()
-            logger.info(f"MODIS collection size: {modis_size}")
-            
-            if modis_size == 0:
-                # Try a broader date range
-                logger.warning("No MODIS images found, trying broader date range...")
-                broader_start = '2020-01-01'
-                broader_end = '2023-12-31'
-                modis_collection = ee.ImageCollection('MODIS/061/MCD12Q1').filterDate(broader_start, broader_end)
-                modis_size = modis_collection.size().getInfo()
-                logger.info(f"MODIS collection size with broader range: {modis_size}")
-                
-                if modis_size == 0:
-                    return jsonify({"error": "No MODIS land cover data available for this region"}), 404
-            
-            modis_mean = modis_collection.mean()
-            vegetation = modis_mean.select('LC_Type1').rename('vegetation')
-            logger.info("MODIS data processed successfully")
-            
+            vegetation = get_cached_modis_data(start_date, end_date, west, south, east, north)
         except Exception as e:
-            logger.error(f"Error processing MODIS data: {str(e)}")
+            logger.error(f"Error getting MODIS data: {str(e)}")
             return jsonify({"error": f"Failed to process land cover data: {str(e)}"}), 500
 
-        composite = None
-        best_value_band = None
-
-        # ---------------- WIND ----------------
+        # Plant-specific processing (optimized)
         if plant_type.lower() == "wind":
-            logger.info("Processing wind energy data...")
             try:
                 era5 = ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR").filterDate(start_date, end_date).filterBounds(region)
-                era5_size = era5.size().getInfo()
-                logger.info(f"ERA5 collection size: {era5_size}")
                 
-                if era5_size == 0:
+                # Check if data exists quickly
+                if era5.size().getInfo() == 0:
                     return jsonify({"error": "No wind data found for the specified date range and region"}), 404
 
+                # Simplified wind speed calculation
                 era5_mean = era5.mean()
                 wind_speed = era5_mean.expression(
                     'sqrt(pow(u, 2) + pow(v, 2))',
@@ -165,183 +194,191 @@ def get_optimal_location():
                     }
                 ).rename('wind_speed')
 
-                logger.info("Getting ESA WorldCover data...")
-                world_cover = ee.ImageCollection("ESA/WorldCover/v100").filterBounds(region).first()
-                
-                # Create urban mask (50 = built-up areas in ESA WorldCover)
-                urban_mask = world_cover.eq(50).multiply(1000)  # Penalty for urban areas
-                
-                # Create composite score (higher wind speed is better, subtract penalties)
-                composite = wind_speed.subtract(vegetation.multiply(0.1)).subtract(urban_mask).rename('score')
+                # Simplified urban penalty (skip WorldCover for speed)
+                composite = wind_speed.subtract(vegetation.multiply(0.05)).rename('score')
                 best_value_band = 'wind_speed'
-                combined = wind_speed.addBands(vegetation).addBands(urban_mask.rename('urban_penalty')).addBands(composite)
+                combined = wind_speed.addBands(vegetation).addBands(composite)
                 
-                logger.info("Wind data processed successfully")
-
             except Exception as e:
-                logger.error(f"Error processing wind data: {str(e)}")
                 return jsonify({"error": f"Failed to process wind data: {str(e)}"}), 500
 
-        # ---------------- SOLAR ----------------
         elif plant_type.lower() == "solar":
-            logger.info("Processing solar energy data...")
             try:
-                # Try the correct NASA POWER dataset
-                power = ee.ImageCollection("NASA/POWER/DAILY_AGGR").filterDate(start_date, end_date).filterBounds(region)
-                power_size = power.size().getInfo()
-                logger.info(f"NASA POWER collection size: {power_size}")
+                # Try NASA POWER first, fallback to ERA5 quickly
+                try:
+                    power = ee.ImageCollection("NASA/POWER/DAILY_AGGR").filterDate(start_date, end_date).filterBounds(region)
+                    if power.size().getInfo() > 0:
+                        solar = power.select("ALLSKY_SFC_SW_DWN").mean().rename("solar_value")
+                    else:
+                        raise Exception("No NASA POWER data")
+                except:
+                    # Quick fallback to ERA5
+                    era5_solar = ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR").filterDate(start_date, end_date).filterBounds(region)
+                    if era5_solar.size().getInfo() == 0:
+                        return jsonify({"error": "No solar data found"}), 404
+                    solar = era5_solar.select("surface_net_solar_radiation_sum").mean().rename("solar_value")
                 
-                if power_size == 0:
-                    logger.warning("No NASA POWER data found, trying alternative solar datasets...")
-                    
-                    # Try ERA5-Land solar radiation as alternative
-                    try:
-                        era5_solar = ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR").filterDate(start_date, end_date).filterBounds(region)
-                        era5_solar_size = era5_solar.size().getInfo()
-                        logger.info(f"ERA5-Land collection size: {era5_solar_size}")
-                        
-                        if era5_solar_size == 0:
-                            return jsonify({"error": "No solar data found for the specified date range and region"}), 404
-                        
-                        # Use surface net solar radiation from ERA5
-                        solar = era5_solar.select("surface_net_solar_radiation_sum").mean().rename("solar_value")
-                        logger.info("Using ERA5-Land solar radiation data")
-                        
-                    except Exception as era5_error:
-                        logger.error(f"ERA5-Land solar data error: {str(era5_error)}")
-                        return jsonify({"error": "Failed to access solar radiation data from available sources"}), 500
-                        
-                else:
-                    # Use NASA POWER solar data
-                    solar = power.select("ALLSKY_SFC_SW_DWN").mean().rename("solar_value")
-                    logger.info("Using NASA POWER solar data")
-                
-                # Create composite score (higher solar irradiance is better, subtract vegetation penalty)
-                composite = solar.subtract(vegetation.multiply(0.1)).rename("score")
+                composite = solar.subtract(vegetation.multiply(0.05)).rename("score")
                 best_value_band = "solar_value"
                 combined = solar.addBands(vegetation).addBands(composite)
                 
-                logger.info("Solar data processed successfully")
-
             except Exception as e:
-                logger.error(f"Error processing solar data: {str(e)}")
                 return jsonify({"error": f"Failed to process solar data: {str(e)}"}), 500
-
         else:
-            return jsonify({"error": f"Invalid plant type: {plant_type}. Must be 'wind' or 'solar'"}), 400
+            return jsonify({"error": f"Invalid plant type: {plant_type}"}), 400
 
-        # Sample and rank - sampling is constrained to the region boundary
-        logger.info("Sampling and ranking locations within boundary...")
-        try:
-            # The region parameter ensures all samples are within the defined boundary
-            samples = combined.sample(
-                region=region,  # This constrains sampling to the boundary
-                scale=5000, 
-                numPixels=1000,  # Increased sample size
+        # Optimized sampling strategy
+        scale, num_pixels, area_km2, passes = calculate_optimized_sampling_params(west, south, east, north)
+        
+        logger.info(f"Starting optimized {passes}-pass sampling...")
+        all_samples_list = []
+        
+        # Pass 1: Primary sampling (always)
+        samples1 = combined.sample(
+            region=region,
+            scale=scale,
+            numPixels=num_pixels,
+            geometries=True,
+            seed=42
+        )
+        
+        sample_size1 = samples1.size().getInfo()
+        if sample_size1 > 0:
+            all_samples_list.append(samples1)
+        
+        # Pass 2: Center focus (if passes >= 2)
+        if passes >= 2 and sample_size1 > 0:
+            margin_lon = (east - west) * 0.3
+            margin_lat = (north - south) * 0.3
+            
+            center_region = ee.Geometry.Rectangle([
+                west + margin_lon, south + margin_lat,
+                east - margin_lon, north - margin_lat
+            ])
+            
+            samples2 = combined.sample(
+                region=center_region,
+                scale=scale // 2,
+                numPixels=num_pixels // 3,
                 geometries=True,
-                seed=42  # For reproducible results
+                seed=123
             )
             
-            sample_size = samples.size().getInfo()
-            logger.info(f"Generated {sample_size} samples within boundary")
+            sample_size2 = samples2.size().getInfo()
+            if sample_size2 > 0:
+                all_samples_list.append(samples2)
+        
+        # Pass 3: Edge sampling (if passes >= 3 and area is large enough)
+        if passes >= 3 and area_km2 > 2000:
+            edge_width = min((east - west) * 0.15, (north - south) * 0.15)
             
-            if sample_size == 0:
-                return jsonify({"error": "No valid samples found in the specified region"}), 404
+            # Only sample 2 edges for speed
+            edge_regions = [
+                ee.Geometry.Rectangle([west, south, west + edge_width, north]),  # Left
+                ee.Geometry.Rectangle([west, north - edge_width, east, north])   # Top
+            ]
             
-            # Sort samples by score (best first)
-            sorted_samples = samples.sort('score', False)
+            for i, edge_region in enumerate(edge_regions):
+                try:
+                    samples_edge = combined.sample(
+                        region=edge_region,
+                        scale=scale,
+                        numPixels=num_pixels // 10,
+                        geometries=True,
+                        seed=200 + i
+                    )
+                    
+                    if samples_edge.size().getInfo() > 0:
+                        all_samples_list.append(samples_edge)
+                except:
+                    pass  # Skip failed edge sampling
+        
+        # Combine samples
+        if len(all_samples_list) == 0:
+            return jsonify({"error": "No valid samples found"}), 404
+        
+        all_samples = all_samples_list[0]
+        for samples in all_samples_list[1:]:
+            all_samples = all_samples.merge(samples)
+        
+        total_sample_size = all_samples.size().getInfo()
+        
+        # Quick top candidate evaluation (limit to 200 for speed)
+        sorted_samples = all_samples.sort('score', False)
+        top_candidates = sorted_samples.limit(min(200, total_sample_size)).getInfo()
+        
+        # Find optimal point
+        optimal_point = None
+        best_properties = None
+        
+        for feature in top_candidates['features']:
+            coords = feature['geometry']['coordinates']
+            lon, lat = coords[0], coords[1]
             
-            # Get multiple top samples and find the first one that's definitely within boundary
-            top_samples = sorted_samples.limit(10)  # Get top 10 samples
-            top_samples_list = top_samples.getInfo()
-            
-            optimal_point = None
-            best_properties = None
-            
-            # Check each top sample to ensure it's within boundary
-            for feature in top_samples_list['features']:
-                coords = feature['geometry']['coordinates']
-                lon, lat = coords[0], coords[1]
-                
-                # Verify the point is within boundary
-                if is_point_in_boundary(lon, lat, lonMin, latMin, lonMax, latMax):
-                    optimal_point = {"lat": lat, "lon": lon}
-                    best_properties = feature['properties']
-                    logger.info(f"Found optimal location within boundary: ({lon}, {lat})")
-                    break
-                else:
-                    logger.warning(f"Sample at ({lon}, {lat}) is outside boundary, trying next...")
-            
-            # If no point found within boundary, use the best sample anyway but log warning
-            if optimal_point is None:
-                logger.warning("No samples found within strict boundary, using best available sample")
-                best_feature = ee.Feature(sorted_samples.first())
-                coords = best_feature.geometry().coordinates().getInfo()
-                optimal_point = {"lat": coords[1], "lon": coords[0]}
-                best_properties = best_feature.toDictionary().getInfo()
+            if is_point_in_boundary(lon, lat, west, south, east, north):
+                optimal_point = {"lat": lat, "lon": lon}
+                best_properties = feature['properties']
+                break
+        
+        if optimal_point is None:
+            return jsonify({"error": "No valid locations found within boundary"}), 404
 
-            logger.info(f"Final optimal location: {optimal_point}")
-            logger.debug(f"Properties: {best_properties}")
-
-            result = {
-                "optimal_point": optimal_point,
-                "value": best_properties.get(best_value_band),
-                "vegetation": best_properties.get('vegetation'),
-                "score": best_properties.get('score'),
-                "plant_type": plant_type.lower(),
-                "sample_count": sample_size,
-                "date_range": {"start": start_date, "end": end_date},
-                "boundary": {
-                    "lonMin": lonMin,
-                    "latMin": latMin,
-                    "lonMax": lonMax,
-                    "latMax": latMax
-                },
-                "within_boundary": is_point_in_boundary(
-                    optimal_point["lon"], 
-                    optimal_point["lat"], 
-                    lonMin, latMin, lonMax, latMax
-                )
+        # Build response
+        processing_time = time.time() - start_time
+        
+        result = {
+            "optimal_point": optimal_point,
+            "value": best_properties.get(best_value_band),
+            "vegetation": best_properties.get('vegetation'),
+            "score": best_properties.get('score'),
+            "plant_type": plant_type.lower(),
+            "performance_stats": {
+                "total_samples": total_sample_size,
+                "processing_time_seconds": round(processing_time, 2),
+                "resolution_meters": scale,
+                "area_km2": round(area_km2, 2),
+                "passes_completed": len(all_samples_list),
+                "candidates_evaluated": len(top_candidates['features'])
+            },
+            "date_range": {"start": start_date, "end": end_date},
+            "boundary": {
+                "west": west, "south": south, "east": east, "north": north
             }
-            
-            # Add plant-specific data
-            if plant_type.lower() == "wind":
-                result["urban_penalty"] = best_properties.get('urban_penalty', 0)
-            
-            logger.info("Request processed successfully - optimal location found")
-            return jsonify(result)
-
-        except Exception as e:
-            logger.error(f"Error during sampling: {str(e)}")
-            return jsonify({"error": f"Failed to sample locations: {str(e)}"}), 500
+        }
+        
+        logger.info(f"Request completed in {processing_time:.2f}s with {total_sample_size} samples")
+        return jsonify(result)
 
     except Exception as e:
-        logger.error(f"Unexpected error in get_optimal_location: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        processing_time = time.time() - start_time
+        logger.error(f"Error after {processing_time:.2f}s: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     try:
-        # Test Earth Engine connection
+        start_time = time.time()
         ee.Number(1).getInfo()
-        return jsonify({"status": "healthy", "earth_engine": "connected"})
+        response_time = time.time() - start_time
+        return jsonify({
+            "status": "healthy", 
+            "earth_engine": "connected",
+            "response_time_ms": round(response_time * 1000, 2)
+        })
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
-    logger.warning(f"404 error: {request.url}")
     return jsonify({"error": "Endpoint not found"}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.error(f"500 error: {str(error)}")
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
-    logger.info("Starting Flask application...")
+    logger.info("Starting optimized Flask application...")
     print("Available routes:")
     for rule in app.url_map.iter_rules():
         print(f"  {rule.endpoint}: {rule.rule} [{', '.join(rule.methods)}]")
