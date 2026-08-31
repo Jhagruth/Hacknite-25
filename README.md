@@ -4,7 +4,7 @@
 This project implements a machine learning-based suitability model that integrates environmental and spatial data with Google Earth Engine APIs. The model utilises XGBoost for advanced predictions, incorporating polynomial features, hyperparameter tuning, and feature importance analysis.
 
 ## Data Sources
-The following datasets were used in this project:
+The following datasets were used in this project::
 
 1. **MODIS/061/MCD12Q1** - Vegetation data
 2. **ECMWF/ERA5/DAILY** - Wind speed data
